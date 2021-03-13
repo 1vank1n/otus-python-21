@@ -106,7 +106,7 @@ def load_config(
 
     with open(config_path) as f:
         try:
-            config_dict = json.loads(' '.join(f.readlines()))
+            config_dict = json.load(f)
         except ValueError:
             raise SystemExit('Wrong config file, check that you have json structure')
     return config_dict
