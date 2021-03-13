@@ -1,5 +1,4 @@
-import fnmatch
-import getopt
+import argparse
 import gzip
 import json
 import logging
@@ -39,8 +38,8 @@ Config = TypedDict(
     NUMBER_ROUND_DEPTH=int,
 )
 
-Filepath = TypedDict(
-    'Filepath',
+Fileinfo = TypedDict(
+    'Fileinfo',
     path=str,
     date=datetime,
     extension=str,
@@ -89,87 +88,84 @@ ProcessedLog = TypedDict(
     data=Dict[str, ProcessedLine],
 )
 
-logging.basicConfig(format=CONFIG['LOGGING_FORMAT'], level=logging.INFO, handlers=[])
-stdout_handler = logging.StreamHandler(sys.stdout)
-logger = logging.getLogger()
-logger.addHandler(stdout_handler)
-
 
 def process_argv() -> dict:
-    config_path = None
+    parser = argparse.ArgumentParser(description='Create report from nginx log files')
+    parser.add_argument('--config', dest='config_path', help='set path to custom config')
+    args = parser.parse_args()
+    return vars(args)
+
+
+def load_config(
+    *,
+    config_path: str,
+) -> dict:
     config_dict = {}
+    if not os.path.exists(config_path):
+        raise SystemExit('Wrong path to config')
 
-    USAGE = '''\
-Usage: log_analyzer.py
-For custom config use `--config=<config_file>`
-Example custom config file:
-{
-    "REPORT_SIZE": 1000,
-    "REPORT_DIR": "./reports",
-    "LOG_DIR": "./log"
-}
-'''
-
-    try:
-        opts, _ = getopt.getopt(sys.argv[1:], shortopts='h', longopts=['config='])
-    except getopt.GetoptError:
-        logger.exception(f'Wrong args. {USAGE}')
-        raise SystemExit()
-
-    for opt, arg in opts:
-        if opt == '-h':
-            raise SystemExit(USAGE)
-        if opt == '--config':
-            config_path = arg
-
-    if config_path:
-        if not os.path.exists(config_path):
-            logger.exception('Wrong path to config')
-            raise SystemExit()
-
-        with open(config_path) as f:
-            try:
-                config_dict = json.loads(' '.join(f.readlines()))
-            except ValueError:
-                logger.exception('Wrong config file, check that you have json structure')
-                raise SystemExit()
-
+    with open(config_path) as f:
+        try:
+            config_dict = json.loads(' '.join(f.readlines()))
+        except ValueError:
+            raise SystemExit('Wrong config file, check that you have json structure')
     return config_dict
 
 
-def get_config(config_dict: dict) -> Config:
+def get_config(
+    *,
+    config_dict: dict,
+) -> Config:
     combined_config = {**CONFIG, **config_dict}
-
-    logger.info('Run with config:')
-    for key, value in combined_config.items():
-        logger.info(f'{key} = {value}')
     return Config(**combined_config)
 
 
-def generate_report_filename(config: Config, log_filepath: Filepath) -> Filepath:
-    date = log_filepath['date'].strftime('%Y.%m.%d')
+def get_logger(
+    *,
+    config: Config,
+) -> logging.Logger:
+    logging.basicConfig(format=CONFIG['LOGGING_FORMAT'], level=logging.INFO, handlers=[])
+    logger = logging.getLogger()
+    if config['LOGGING_FILE']:
+        logger.addHandler(logging.FileHandler(filename=config['LOGGING_FILE']))
+    else:
+        logger.addHandler(logging.StreamHandler(sys.stdout))
+    return logger
+
+
+def generate_report_filename(
+    *,
+    config: Config,
+    log_fileinfo: Fileinfo,
+) -> Fileinfo:
+    date = log_fileinfo['date'].strftime('%Y.%m.%d')
     filename = f'report-{date}.html'
-    filepath = Filepath(
+    fileinfo = Fileinfo(
         path=os.path.join(config['REPORT_DIR'], filename),
-        date=log_filepath['date'],
+        date=log_fileinfo['date'],
         extension='.html',
     )
-    return filepath
+    return fileinfo
 
 
-def find_log(config: Config) -> Filepath:
-    filename_mask = 'nginx-access-ui.log-*'
+def find_log(
+    *,
+    config: Config,
+    logger: logging.Logger,
+) -> Fileinfo:
+    filename_pattern = re.compile(r'nginx-access-ui\.log-(\d{8})')
     date_format = '%Y%m%d'
     last_date = None
     log_filename = ''
 
     for filename in os.listdir(config['LOG_DIR']):
-        if fnmatch.fnmatch(filename, filename_mask):
-            name, extension = os.path.splitext(filename)
+        matched = filename_pattern.match(filename)
+        if matched:
+            _, extension = os.path.splitext(filename)
             if extension not in config['SUPPORTED_LOG_FORMATS']:
                 continue
 
-            date_str = ''.join(x for x in name if x.isdigit())
+            date_str = matched.groups()[0]
             try:
                 date = datetime.strptime(date_str, date_format)
             except ValueError:
@@ -184,21 +180,32 @@ def find_log(config: Config) -> Filepath:
         raise SystemExit()
 
     _, extension = os.path.splitext(log_filename)
-    log_filepath = Filepath(
+    log_fileinfo = Fileinfo(
         path=os.path.join(config['LOG_DIR'], log_filename),
         date=last_date,
         extension=extension,
     )
+    return log_fileinfo
 
-    report_filepath = generate_report_filename(config, log_filepath)
-    if os.path.exists(report_filepath['path']):
-        logger.warning(f'Report already generated, check {report_filepath["path"]}')
+
+def check_is_exist_report(
+    *,
+    config: Config,
+    log_fileinfo: Fileinfo,
+    logger: logging.Logger,
+) -> None:
+    report_fileinfo = generate_report_filename(config=config, log_fileinfo=log_fileinfo)
+    if os.path.exists(report_fileinfo['path']):
+        logger.warning(f'Report already generated, check {report_fileinfo["path"]}')
         raise SystemExit()
 
-    return log_filepath
 
-
-def parse_log(config: Config, log_filepath: Filepath) -> ParsedLog:
+def parse_log(
+    *,
+    config: Config,
+    log_fileinfo: Fileinfo,
+    logger: logging.Logger,
+) -> ParsedLog:
     parsed_log = ParsedLog(
         total_count=0,
         total_time=0.0,
@@ -227,8 +234,8 @@ def parse_log(config: Config, log_filepath: Filepath) -> ParsedLog:
     )
 
     openers = {'.gz': gzip.open, '': open}
-    opener = openers.get(log_filepath['extension'], open)
-    lines = (line for line in opener(log_filepath['path'], mode='rt'))
+    opener = openers.get(log_fileinfo['extension'], open)
+    lines = (line for line in opener(log_fileinfo['path'], mode='rt'))
     count = 0
     terminated_count = 0
     for line in lines:
@@ -254,7 +261,11 @@ def parse_log(config: Config, log_filepath: Filepath) -> ParsedLog:
     return parsed_log
 
 
-def process_log(config: Config, parsed_log: ParsedLog) -> ProcessedLog:
+def process_log(
+    *,
+    config: Config,
+    parsed_log: ParsedLog,
+) -> ProcessedLog:
     tmp_data = {}
 
     parsed_lines = (parsed_line for parsed_line in parsed_log['parsed_lines'])
@@ -294,7 +305,13 @@ def process_log(config: Config, parsed_log: ParsedLog) -> ProcessedLog:
     return processed_log
 
 
-def generate_report(config: Config, processed_log: ProcessedLog, log_filepath: Filepath) -> None:
+def generate_report(
+    *,
+    config: Config,
+    processed_log: ProcessedLog,
+    log_fileinfo: Fileinfo,
+    logger: logging.Logger,
+) -> None:
     table_list = []
     nrd = config['NUMBER_ROUND_DEPTH']
 
@@ -327,11 +344,11 @@ def generate_report(config: Config, processed_log: ProcessedLog, log_filepath: F
         report_template = Template(f.read())
         report_render = report_template.safe_substitute(table_json=table_json)
 
-    report_filepath = generate_report_filename(config, log_filepath)
-    with open(report_filepath['path'], 'w') as f:
+    report_fileinfo = generate_report_filename(config=config, log_fileinfo=log_fileinfo)
+    with open(report_fileinfo['path'], 'w') as f:
         f.write(report_render)
 
-    logger.info(f'Success: report ready: {report_filepath["path"]}')
+    logger.info(f'Success: report ready: {report_fileinfo["path"]}')
     return
 
 
@@ -341,23 +358,30 @@ def main():
     Steps:
     1. Process args
     2. Read config
-    3. Find log
-        3.1 Check already generated report
-    4. Parse log
-    5. Process log
-    6. Generate report
+    3. Setup logger
+    4. Find log
+    5. Check already generated report
+    6. Parse log
+    7. Process log
+    8. Generate report
     """
 
-    config_dict: dict = process_argv()
-    config: Config = get_config(config_dict)
-    if config['LOGGING_FILE']:
-        global logger, stdout_handler
-        logger.removeHandler(stdout_handler)
-        logger.addHandler(logging.FileHandler(filename=config['LOGGING_FILE']))
-    log_filepath: Filepath = find_log(config)
-    parsed_log: ParsedLog = parse_log(config, log_filepath)
-    processed_log: ProcessedLog = process_log(config, parsed_log)
-    generate_report(config, processed_log, log_filepath)
+    args: dict = process_argv()
+    config_path: str = args.get('config_path', '')
+    config_dict: dict = load_config(config_path=config_path) if config_path else {}
+    config: Config = get_config(config_dict=config_dict)
+    logger: logging.Logger = get_logger(config=config)
+    log_fileinfo: Fileinfo = find_log(config=config, logger=logger)
+    check_is_exist_report(config=config, log_fileinfo=log_fileinfo, logger=logger)
+    parsed_log: ParsedLog = parse_log(config=config, log_fileinfo=log_fileinfo, logger=logger)
+    processed_log: ProcessedLog = process_log(config=config, parsed_log=parsed_log)
+
+    generate_report(
+        config=config,
+        processed_log=processed_log,
+        log_fileinfo=log_fileinfo,
+        logger=logger,
+    )
     return
 
 

@@ -1,5 +1,6 @@
 import gzip
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -26,10 +27,11 @@ class LogAnalyzerTests(unittest.TestCase):
         cls.test_wrong_log_dir = tempfile.mkdtemp()
         cls.test_report_dir = tempfile.mkdtemp()
         cls.config = log_analyzer.get_config(
-            {
+            config_dict={
                 'LOG_DIR': cls.test_log_dir,
                 'REPORT_DIR': cls.test_report_dir,
             })
+        cls.logger = logging.getLogger()
 
         open(f'{cls.test_log_dir}/nginx-access-ui.log-20210223.gz', 'w').close()
         open(f'{cls.test_log_dir}/nginx-access-ui.log-20210224.gz', 'w').close()
@@ -69,63 +71,84 @@ class LogAnalyzerTests(unittest.TestCase):
             'NEW_KEY': 'new_value',
         }
 
-        updated_config = log_analyzer.get_config(new_config)
+        updated_config = log_analyzer.get_config(config_dict=new_config)
         for key in new_config.keys():
             self.assertEqual(updated_config[key], new_config[key])
 
     def test_generate_report_filename(self):
         log_filename = 'nginx-test-log.gz'
         date = datetime(2021, 3, 1)
-        log_filepath = log_analyzer.Filepath(
+        log_fileinfo = log_analyzer.Fileinfo(
             path=os.path.join(self.config['LOG_DIR'], log_filename),
             date=date,
             extension='.gz',
         )
 
-        report_filepath = log_analyzer.generate_report_filename(self.config, log_filepath)
-        self.assertEqual(report_filepath['path'], f'{self.test_report_dir}/report-2021.03.01.html')
-        self.assertEqual(report_filepath['date'], date)
-        self.assertEqual(report_filepath['extension'], '.html')
+        report_fileinfo = log_analyzer.generate_report_filename(
+            config=self.config,
+            log_fileinfo=log_fileinfo,
+        )
+
+        self.assertEqual(report_fileinfo['path'], f'{self.test_report_dir}/report-2021.03.01.html')
+        self.assertEqual(report_fileinfo['date'], date)
+        self.assertEqual(report_fileinfo['extension'], '.html')
 
     def test_find_log(self):
-        log_filepath = log_analyzer.find_log(self.config)
-        self.assertEqual(log_filepath['path'], self.last_log_filename)
-        self.assertEqual(log_filepath['date'], datetime(2021, 3, 1))
-        self.assertEqual(log_filepath['extension'], '.gz')
+        log_fileinfo = log_analyzer.find_log(config=self.config, logger=self.logger)
+        self.assertEqual(log_fileinfo['path'], self.last_log_filename)
+        self.assertEqual(log_fileinfo['date'], datetime(2021, 3, 1))
+        self.assertEqual(log_fileinfo['extension'], '.gz')
 
         with self.assertRaises(FileNotFoundError):
             """Check wrong log dir"""
-            config = log_analyzer.get_config({'LOG_DIR': f'{self.test_log_dir}/wrong_path'})
-            log_analyzer.find_log(config)
+            config = log_analyzer.get_config(
+                config_dict={'LOG_DIR': f'{self.test_log_dir}/wrong_path'})
+            log_analyzer.find_log(config=config, logger=self.logger)
 
         with self.assertRaises(SystemExit):
             """Check dir without log"""
-            config = log_analyzer.get_config({'LOG_DIR': self.test_wrong_log_dir})
-            log_analyzer.find_log(config)
+            config = log_analyzer.get_config(config_dict={'LOG_DIR': self.test_wrong_log_dir})
+            log_analyzer.find_log(config=config, logger=self.logger)
 
+    def test_check_is_exist_report(self):
         report_path = f'{self.test_report_dir}/report-2021.03.01.html'
+        date = datetime(2021, 3, 1)
+        log_fileinfo = log_analyzer.Fileinfo(
+            path=os.path.join(self.config['LOG_DIR'], 'nginx-access-ui.log-20210301.gz'),
+            date=date,
+            extension='.gz',
+        )
         with self.assertRaises(SystemExit):
             """Check already generated report"""
             open(report_path, 'w').close()
-            config = log_analyzer.get_config(
-                {
-                    'LOG_DIR': self.test_log_dir,
-                    'REPORT_DIR': self.test_report_dir
-                })
-            log_analyzer.find_log(config)
+            log_analyzer.check_is_exist_report(
+                config=self.config,
+                log_fileinfo=log_fileinfo,
+                logger=self.logger,
+            )
 
     def test_parse_log(self):
-        log_filepath = log_analyzer.find_log(self.config)
-        parsed_log = log_analyzer.parse_log(self.config, log_filepath)
+        log_fileinfo = log_analyzer.find_log(config=self.config, logger=self.logger)
+        parsed_log = log_analyzer.parse_log(
+            config=self.config,
+            log_fileinfo=log_fileinfo,
+            logger=self.logger,
+        )
+
         self.assertEqual(parsed_log['total_count'], self.COUNT_LINES)
         self.assertEqual(parsed_log['total_time'], self.COUNT_LINES * self.REQUEST_TIME)
         self.assertEqual(len(parsed_log['parsed_lines']), self.COUNT_LINES)
         self.assertEqual(parsed_log['parsed_lines'][0]['request_time'], self.REQUEST_TIME)
 
     def test_process_log(self):
-        log_filepath = log_analyzer.find_log(self.config)
-        parsed_log = log_analyzer.parse_log(self.config, log_filepath)
-        processed_log = log_analyzer.process_log(self.config, parsed_log)
+        log_fileinfo = log_analyzer.find_log(config=self.config, logger=self.logger)
+        parsed_log = log_analyzer.parse_log(
+            config=self.config,
+            log_fileinfo=log_fileinfo,
+            logger=self.logger,
+        )
+
+        processed_log = log_analyzer.process_log(config=self.config, parsed_log=parsed_log)
         self.assertEqual(processed_log['total_count'], self.COUNT_LINES)
         self.assertEqual(processed_log['total_time'], self.COUNT_LINES * self.REQUEST_TIME)
         self.assertEqual(len(processed_log['data'].items()), 1)
@@ -145,7 +168,7 @@ class LogAnalyzerTests(unittest.TestCase):
         )
         DATA = {'/test-url/': PROCESSED_LINE}
 
-        log_filepath = log_analyzer.find_log(self.config)
+        log_fileinfo = log_analyzer.find_log(config=self.config, logger=self.logger)
         processed_log = log_analyzer.ProcessedLog(
             total_count=1,
             total_time=5,
@@ -154,14 +177,24 @@ class LogAnalyzerTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             """Check that report.html not found"""
-            log_analyzer.generate_report(self.config, processed_log, log_filepath)
+            log_analyzer.generate_report(
+                config=self.config,
+                processed_log=processed_log,
+                log_fileinfo=log_fileinfo,
+                logger=self.logger,
+            )
 
         report_template_path = os.path.join(self.config['REPORT_DIR'], 'report.html')
         report_template_content = '$table_json'
         with open(report_template_path, 'w') as f:
             f.write(report_template_content)
 
-        log_analyzer.generate_report(self.config, processed_log, log_filepath)
+        log_analyzer.generate_report(
+            config=self.config,
+            processed_log=processed_log,
+            log_fileinfo=log_fileinfo,
+            logger=self.logger,
+        )
         table_json = json.dumps(
             [
                 {
@@ -176,8 +209,12 @@ class LogAnalyzerTests(unittest.TestCase):
                 }
             ])
 
-        report_filepath = log_analyzer.generate_report_filename(self.config, log_filepath)
-        with open(report_filepath['path'], 'r') as f:
+        report_fileinfo = log_analyzer.generate_report_filename(
+            config=self.config,
+            log_fileinfo=log_fileinfo,
+        )
+
+        with open(report_fileinfo['path'], 'r') as f:
             line = f.read()
             self.assertEqual(line, table_json)
 

@@ -7,7 +7,6 @@
 .DS_store
 
 # HW1
-hw1/log/*
-!hw1/log/.*
+hw1/log
 hw1/reports/report-*.html
 hw1/requirements.txt
